@@ -1,6 +1,4 @@
-# train/export_policy.py
-import base64
-import json
+import base64, json
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -26,22 +24,19 @@ def main():
         if isinstance(m, torch.nn.Linear)
     ]
 
-    layers_json = []
-    for layer in linear_layers:
-        w = layer.weight.detach().cpu().numpy()
-        b = layer.bias.detach().cpu().numpy()
-        layers_json.append({
-            "in": int(w.shape[1]),
-            "out": int(w.shape[0]),
-            "w": b64_f32(w),
-            "b": b64_f32(b),
-        })
+    layers_json = [{
+        "in": int(l.weight.shape[1]),
+        "out": int(l.weight.shape[0]),
+        "w": b64_f32(l.weight.detach().cpu().numpy()),
+        "b": b64_f32(l.bias.detach().cpu().numpy()),
+    } for l in linear_layers]
 
-    # Verify exported math matches SB3 PyTorch logits
     rng = np.random.default_rng(0)
     test_obs = rng.uniform(-1, 1, size=(1, OBS_SIZE)).astype(np.float32)
     with torch.no_grad():
-        torch_logits = policy.get_distribution(torch.from_numpy(test_obs)).distribution.logits.numpy()[0]
+        obs_t = torch.from_numpy(test_obs)
+        feat = policy.extract_features(obs_t, policy.pi_features_extractor)
+        torch_logits = policy.action_net(policy.mlp_extractor.forward_actor(feat)).numpy()[0]
 
     x = test_obs[0].astype(np.float64)
     for i, layer in enumerate(layers_json):
