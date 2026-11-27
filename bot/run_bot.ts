@@ -59,6 +59,8 @@ async function main() {
   let inputLog = new Map<number, Record<string, number>>();
   let history = new Map<number, { rawState: unknown; held: Record<string, number>; ftu: number }>();
   let seenOppLog = false;
+      let meSentLogs = 0;
+      let rolledBackState: any = null;
   let loop: NodeJS.Timeout | null = null;
 
   const stopMatch = (reason?: string) => {
@@ -102,15 +104,21 @@ async function main() {
 
     // Rollback & replay if an opponent packet arrived for a frame we already stepped
     if (f < simFrame && history.has(f)) {
-      const snap = history.get(f)!;
-      engine.setRawState(snap.rawState);
-      heldActions = { ...snap.held };
-      prevFtu = snap.ftu;
-      const target = simFrame;
-      for (let t = f; t < target; t++) {
-        stepOneFrame(t);
-      }
-    } else if (f < simFrame) {
+          console.log('[rollback]', { f, simFrame, lag: simFrame - f });
+          const snap = history.get(f)!;
+          engine.setRawState(snap.rawState);
+          (engine as any).lastBits = [];
+          heldActions = { ...snap.held };
+          prevFtu = snap.ftu;
+          const target = simFrame;
+          rolledBackState = null;
+          for (let t = f; t < target; t++) {
+            if (t > f && rolledBackState) prevFtu = rolledBackState.ftu;
+            rolledBackState = stepOneFrame(t);
+          }
+        } else if (f < simFrame) {
+          console.log('[rollback-miss]', { f, simFrame, lag: simFrame - f });
+        } else if (f < simFrame) {
       heldActions[String(playerId)] = bits;
     }
   };
@@ -191,7 +199,11 @@ async function main() {
       const targetFrame = Math.max(0, nowFrame - LAG_FRAMES);
       let latestState: WdbState = engine.getState();
 
-      while (simFrame < targetFrame) {
+      if (rolledBackState) {
+          latestState = rolledBackState;
+          rolledBackState = null;
+        }
+        while (simFrame < targetFrame) {
         latestState = stepOneFrame(simFrame);
         simFrame++;
 
@@ -202,8 +214,6 @@ async function main() {
             stopMatch(`win limit reached (${maxScore}/${winLimit})`);
             return;
           }
-          heldActions = {};
-          lastSentBits = 0;
         }
         prevFtu = latestState.ftu;
       }
@@ -219,12 +229,14 @@ async function main() {
           bits = mirror ? mirrorBits(rawBits) : rawBits;
         }
         if (bits !== lastSentBits) {
-          lastSentBits = bits;
-          const sent = room.sendInput(bits);
-          queueInput(me.id, bits, sent.f);
-        } else {
-          heldActions[String(me.id)] = bits;
+        lastSentBits = bits;
+        const sent = room.sendInput(bits);
+        if (meSentLogs < 5) {
+          meSentLogs++;
+          console.log('[me-sent]', { bits, f: sent.f, nowFrame, simFrame });
         }
+        queueInput(me.id, bits, sent.f);
+      }
         if (simFrame % 30 === 0) {
           const o = latestState.discs[String(opp.id)];
           const fmt = (p?: { x: number; y: number; alive: boolean }) =>
