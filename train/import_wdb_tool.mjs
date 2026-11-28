@@ -242,11 +242,11 @@ if (fs.existsSync(REPLAY_DIR)) {
 if (fs.existsSync('data/kickoff_tapes.json')) {
   const { tapes = [] } = JSON.parse(fs.readFileSync('data/kickoff_tapes.json', 'utf8'));
   const kEngine = new WdbEngine();
-  const repeat = tapes.length >= 40 ? 2 : 3;
   let kickoffFrames = 0;
-  for (let rep = 0; rep < repeat; rep++) {
-    for (const tape of tapes) {
-      if (!Array.isArray(tape.canon) || !tape.canon.length) continue;
+  for (const tape of tapes) {
+    if (!Array.isArray(tape.canon) || !tape.canon.length) continue;
+    const reps = tape.canon.length <= 350 ? 2 : 1;
+    for (let rep = 0; rep < reps; rep++) {
       let ws = kEngine.reset([{ id: 0, team: TEAM_RED }, { id: 1, team: TEAM_BLUE }], 1, { skipCountdown: true });
       ws = ws?.state?.ball ? ws.state : (ws?.ball ? ws : kEngine.getState());
       for (let i = 0; i < tape.canon.length; i++) {
@@ -259,7 +259,7 @@ if (fs.existsSync('data/kickoff_tapes.json')) {
       }
     }
   }
-  console.log(`Kickoff tapes (${tapes.length} shots x${repeat}): added ${kickoffFrames} frames`);
+  console.log(`Kickoff tapes (${tapes.length} shots): added ${kickoffFrames} frames`);
 }
 
 const n = actList.length;

@@ -105,13 +105,17 @@ for (const file of files) {
   if (firstActive < 0) continue;
   const start = Math.max(0, firstActive - 1);
   const mirror = side === 'red';
-  const canon = rawBits.slice(start, start + 600).map((b) => (mirror ? mirrorBits(b) : b));
+  const canon = rawBits.slice(start, start + 1500).map((b) => (mirror ? mirrorBits(b) : b));
+  const fullCanon = canon.slice();
 
-  // Verify full shot inside bonk-core.mjs
+  // Verify full shot inside bonk-core.mjs (plus up to 180 frames for ball to coast into +-700 goal)
   engine.reset([{ id: 0, team: TEAM_RED }, { id: 1, team: TEAM_BLUE }], 1, { skipCountdown: true });
   let maxVx = 0, maxX = 365, oppDied = false, shootLen = canon.length;
-  for (let i = 0; i < canon.length; i++) {
-    const res = engine.step({ '1': canon[i], '0': 0 }, 1);
+  const totalMax = canon.length + 180;
+  for (let i = 0; i < totalMax; i++) {
+    const bits = i < canon.length ? canon[i] : 0;
+    if (i >= canon.length) fullCanon.push(0);
+    const res = engine.step({ '1': bits, '0': 0 }, 1);
     if (res.state.ball.xv > maxVx) maxVx = res.state.ball.xv;
     if (res.state.ball.x > maxX) maxX = res.state.ball.x;
     if (res.winner === TEAM_BLUE) { oppDied = true; shootLen = i + 1; break; }
@@ -119,7 +123,7 @@ for (const file of files) {
   }
   const keep = oppDied;
   console.log(`${keep ? 'KEEP' : 'SKIP'} ${file}: side=${side}, len=${shootLen}, ballMaxX=${Math.round(maxX)}, maxVx=${Math.round(maxVx)}, kill=${oppDied}`);
-  if (keep) tapes.push({ file, canon: canon.slice(0, shootLen) });
+  if (keep) tapes.push({ file, canon: fullCanon.slice(0, shootLen) });
 }
 
 fs.writeFileSync(OUT, JSON.stringify({ tapes }, null, 1));

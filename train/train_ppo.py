@@ -74,6 +74,9 @@ def main():
     sp_path = "models/selfplay_opp.json"
     sp_pool = Path("models/selfplay_pool")
     sp_pool.mkdir(parents=True, exist_ok=True)
+    if Path("models/wdb.policy.json").exists() and not (sp_pool / "boss_v1.json").exists():
+        shutil.copy2("models/wdb.policy.json", sp_pool / "boss_v1.json")
+        print("Pinned previous champ as models/selfplay_pool/boss_v1.json!")
     vec_cls = SubprocVecEnv if args.envs > 1 else DummyVecEnv
 
     s1 = 0 if args.skip_stage1 else min(150_000, int(args.steps * 0.10))

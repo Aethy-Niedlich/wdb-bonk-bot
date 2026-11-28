@@ -9,7 +9,7 @@ import { WdbPolicy } from './policy.js';
 
 const POLICY_PATH = process.env.WDB_MODEL ?? 'models/wdb.policy.json';
 const ROOM_URL = process.env.BONK_ROOM_URL;
-const LAG_FRAMES = 4;
+const LAG_FRAMES = 2;
 const KEEP_HISTORY = 45;
 
 const policy = WdbPolicy.fromFile(POLICY_PATH);

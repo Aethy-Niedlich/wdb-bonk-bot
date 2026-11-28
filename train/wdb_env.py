@@ -83,7 +83,7 @@ def scripted_opponent(state: dict, opp_id: int) -> int:
     is_blue = o.get("team") == TEAM_BLUE
     atk_dir = RIGHT if is_blue else LEFT
     def_dir = LEFT if is_blue else RIGHT
-    home_x = 220.0 if is_blue else 510.0
+    home_x = 210.0 if is_blue else 520.0
 
     ox, oy = o["x"], o["y"]
     bx, by = b["x"], b["y"]
@@ -120,7 +120,7 @@ def scripted_opponent(state: dict, opp_id: int) -> int:
 class WdbGymEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, stage: int = 2, max_steps: int = 900, selfplay_json: str = "", selfplay_dir: str = ""):
+    def __init__(self, stage: int = 2, max_steps: int = 1200, selfplay_json: str = "", selfplay_dir: str = ""):
         super().__init__()
         self.stage = stage
         self.max_steps = max_steps
@@ -129,8 +129,10 @@ class WdbGymEnv(gym.Env):
         self.pool_cache: dict[str, tuple[float, NumpyOppPolicy]] = {}
         self.opp_net = NumpyOppPolicy(selfplay_json) if (selfplay_json and os.path.exists(selfplay_json)) else None
         self.opp_mtime = os.path.getmtime(selfplay_json) if self.opp_net else 0.0
+        self.tape_fallback_net: NumpyOppPolicy | None = None
         self.opp_mode = "scripted"
         self.opp_tape = None
+        self.opp_tape_broken = False
         self.action_space = spaces.Discrete(len(ACTION_TABLE))
         self.observation_space = spaces.Box(-5.0, 5.0, shape=(OBS_SIZE,), dtype=np.float32)
 
@@ -190,6 +192,9 @@ class WdbGymEnv(gym.Env):
         self.opp_id = 1 - self.self_id
 
         self.opp_tape = None
+        self.opp_tape_broken = False
+        self.tape_fallback_net = None
+
         if self.stage == 1:
             self.opp_mode = "idle"
         elif self.stage == 2:
@@ -204,9 +209,10 @@ class WdbGymEnv(gym.Env):
             if sp is not None and r < 0.55:
                 self.opp_net = sp
                 self.opp_mode = "selfplay"
-            elif KICKOFF_TAPES and r < 0.80:
+            elif KICKOFF_TAPES and r < 0.85:
                 self.opp_mode = "tape"
                 self.opp_tape = random.choice(KICKOFF_TAPES)["canon"]
+                self.tape_fallback_net = sp
             else:
                 self.opp_mode = "scripted"
 
@@ -233,9 +239,13 @@ class WdbGymEnv(gym.Env):
             opp_obs = build_obs_py(self.state, self.opp_id, self.self_id, not self.mirror)
             opp_raw = ACTION_TABLE[self.opp_net.act(opp_obs)]
             opp_bits = mirror_bits(opp_raw) if (not self.mirror) else opp_raw
-        elif self.opp_mode == "tape" and self.opp_tape is not None and (self.steps - 1) < len(self.opp_tape):
+        elif self.opp_mode == "tape" and not self.opp_tape_broken and self.opp_tape is not None and (self.steps - 1) < len(self.opp_tape):
             tape_raw = self.opp_tape[self.steps - 1]
             opp_bits = mirror_bits(tape_raw) if (self.opp_team == TEAM_RED) else tape_raw
+        elif self.opp_mode == "tape" and self.tape_fallback_net is not None:
+            opp_obs = build_obs_py(self.state, self.opp_id, self.self_id, not self.mirror)
+            opp_raw = ACTION_TABLE[self.tape_fallback_net.act(opp_obs)]
+            opp_bits = mirror_bits(opp_raw) if (not self.mirror) else opp_raw
         else:
             opp_bits = scripted_opponent(self.state, self.opp_id)
 
@@ -246,6 +256,16 @@ class WdbGymEnv(gym.Env):
         })
         self.state = res["state"]
         winner = res["winner"]
+
+        if self.opp_mode == "tape" and not self.opp_tape_broken:
+            m_now = self.state["discs"].get(str(self.self_id)) or {}
+            o_now = self.state["discs"].get(str(self.opp_id)) or {}
+            if m_now.get("alive"):
+                bn = self.state["ball"]
+                dm = math.hypot(bn["x"] - m_now.get("x", 0), bn["y"] - m_now.get("y", 0))
+                do = math.hypot(bn["x"] - o_now.get("x", 999), bn["y"] - o_now.get("y", 999)) if o_now.get("alive") else 999.0
+                if m_now.get("holdingBall") or (dm < 52.0 and do > 95.0):
+                    self.opp_tape_broken = True
 
         reward = self._compute_reward(prev_state, self.state, int(action), winner)
         terminated = winner is not None
@@ -278,24 +298,33 @@ class WdbGymEnv(gym.Env):
 
             if me_curr.get("holdingBall"):
                 if not me_prev.get("holdingBall"):
-                    r += 0.25
+                    r += 0.15 if canon_vx >= -100.0 else 0.04
                 r += 0.05 * max(0.0, canon_vx / BALL_MAX_V)
+                if canon_bx < HALF_W and canon_vx > 50.0:
+                    r += 0.01
             elif me_prev.get("holdingBall") and canon_vx > 180.0:
                 r += 0.50 * min(1.5, canon_vx / BALL_MAX_V)
             else:
-                d_prev = math.hypot(
-                    prev["ball"]["x"] - me_prev.get("x", me_curr["x"]),
-                    prev["ball"]["y"] - me_prev.get("y", me_curr["y"]),
-                )
-                if dist > 70.0 and ball_speed < 480.0:
-                    r += 0.004 * max(-3.0, min(3.0, d_prev - dist))
-                if canon_bx < HALF_W and dist > 95.0:
-                    r -= 0.008
-                elif dist > 125.0:
-                    r -= 0.003
+                if canon_bx <= HALF_W + 30.0:
+                    d_prev = math.hypot(
+                        prev["ball"]["x"] - me_prev.get("x", me_curr["x"]),
+                        prev["ball"]["y"] - me_prev.get("y", me_curr["y"]),
+                    )
+                    if dist > 70.0 and ball_speed < 480.0:
+                        r += 0.004 * max(-3.0, min(3.0, d_prev - dist))
+                    if dist > 95.0:
+                        r -= 0.008
+                else:
+                    # Ball is across the center barrier on opponent side: hold goalie/mid spacing, don't glue to x=352!
+                    if canon_bx > HALF_W + 60.0 and canon_vx < 90.0:
+                        if 115.0 <= canon_sx <= 260.0:
+                            r += 0.002
+                        elif canon_sx > 315.0:
+                            r -= 0.003
+                    if canon_sx < 90.0 and canon_vx >= 0.0:
+                        r -= 0.004
+
                 if (raw_bits & HEAVY) and dist > 95.0:
-                    r -= 0.005
-                if canon_sx < 95.0 and canon_bx > 220.0:
                     r -= 0.005
 
         if canon_bx > HALF_W:
