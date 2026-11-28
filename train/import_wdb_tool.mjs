@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { bonk, findBallIdx, PPM } from '../sim/wdb_engine.mjs';
+import { bonk, findBallIdx, PPM, WdbEngine } from '../sim/wdb_engine.mjs';
 import {
   buildObs, bitsToActionIndex, mirrorBits, ACTION_TABLE,
   TEAM_RED, TEAM_BLUE, LEFT, RIGHT, UP, DOWN, HEAVY, GRAPPLE,
 } from '../sim/features.mjs';
 
 const TOOL_DIR = process.argv[2] || 'data/tool_logs';
-const REPLAY_DIR = process.argv[3] || '/content/wdb-bot/reference/replays';
+const REPLAY_DIR = process.argv[3] || ['/content/wdb-bot/reference/replays', '/tmp/wdb_work/wdb-bot/reference/replays', '/kaggle/working/wdb-bot/reference/replays', '../wdb-bot/reference/replays'].find((p) => fs.existsSync(p)) || '/content/wdb-bot/reference/replays';
 
 const CODE_TO_BIT = {
   KeyA: LEFT, ArrowLeft: LEFT,
@@ -237,6 +237,29 @@ if (fs.existsSync(REPLAY_DIR)) {
     }
   }
   console.log(`Replays (${files.length} files): added ${replayFrames} frames`);
+}
+
+if (fs.existsSync('data/kickoff_tapes.json')) {
+  const { tapes = [] } = JSON.parse(fs.readFileSync('data/kickoff_tapes.json', 'utf8'));
+  const kEngine = new WdbEngine();
+  const repeat = tapes.length >= 40 ? 2 : 3;
+  let kickoffFrames = 0;
+  for (let rep = 0; rep < repeat; rep++) {
+    for (const tape of tapes) {
+      if (!Array.isArray(tape.canon) || !tape.canon.length) continue;
+      let ws = kEngine.reset([{ id: 0, team: TEAM_RED }, { id: 1, team: TEAM_BLUE }], 1, { skipCountdown: true });
+      ws = ws?.state?.ball ? ws.state : (ws?.ball ? ws : kEngine.getState());
+      for (let i = 0; i < tape.canon.length; i++) {
+        const bits = tape.canon[i];
+        pushSample(ws, 1, 0, false, bits);
+        kickoffFrames++;
+        const res = kEngine.step({ '1': bits, '0': 0 }, 1);
+        ws = res.state;
+        if (res.winner !== null) break;
+      }
+    }
+  }
+  console.log(`Kickoff tapes (${tapes.length} shots x${repeat}): added ${kickoffFrames} frames`);
 }
 
 const n = actList.length;

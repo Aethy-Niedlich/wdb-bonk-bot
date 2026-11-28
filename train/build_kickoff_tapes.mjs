@@ -45,6 +45,30 @@ for (const file of files) {
 
   let meId = meta?.defence?.me ?? null;
   if (meId == null) {
+    const byN = new Map(ticks.map((t) => [t.n, t]));
+    const votes = {};
+    for (const ke of keyEvents) {
+      if (ke.k !== 'down') continue;
+      const dir = (ke.code === 'KeyA' || ke.code === 'ArrowLeft') ? -1 : (ke.code === 'KeyD' || ke.code === 'ArrowRight') ? 1 : 0;
+      if (!dir) continue;
+      const t0 = byN.get(ke.n), t1 = byN.get(ke.n + 4);
+      if (!t0 || !t1) continue;
+      const p0 = new Map(t0.b.filter(isPlayerRec).map((x) => [x[0], x]));
+      let best = null, second = -1e9;
+      for (const b1 of t1.b) {
+        if (!isPlayerRec(b1)) continue;
+        const b0 = p0.get(b1[0]);
+        if (!b0) continue;
+        const gain = (b1[3] - b0[3]) * dir;
+        if (!best || gain > best.gain) { if (best) second = Math.max(second, best.gain); best = { id: b1[0], gain }; }
+        else second = Math.max(second, gain);
+      }
+      if (best && best.gain > 0.8 && best.gain > second + 0.5) votes[best.id] = (votes[best.id] || 0) + 1;
+    }
+    const ranked = Object.entries(votes).sort((a, b) => b[1] - a[1]);
+    if (ranked.length) meId = Number(ranked[0][0]);
+  }
+  if (meId == null) {
     const counts = new Map();
     for (const tk of ticks) {
       for (const b of tk.b) if (isPlayerRec(b)) counts.set(b[0], (counts.get(b[0]) || 0) + 1);

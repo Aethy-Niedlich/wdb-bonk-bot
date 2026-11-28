@@ -69,7 +69,6 @@ class NumpyOppPolicy:
         for i, (w, b) in enumerate(self.layers):
             y = w @ x + b
             x = np.tanh(y) if i < len(self.layers) - 1 else y
-        # Sample with mild temperature so opponent isn't purely deterministic
         logits = x - np.max(x)
         probs = np.exp(logits)
         probs /= np.sum(probs)
@@ -90,7 +89,6 @@ def scripted_opponent(state: dict, opp_id: int) -> int:
     bx, by = b["x"], b["y"]
     dist = math.hypot(bx - ox, by - oy)
 
-    # Emergency dodge: NEVER hold grapple or move toward ball inside 60px!
     if dist < 60:
         bits = RIGHT if ox > bx else LEFT
         if o.get("onFloor", True) and by > oy - 15:
@@ -101,7 +99,6 @@ def scripted_opponent(state: dict, opp_id: int) -> int:
         canon_vx = b["xv"] if is_blue else -b["xv"]
         if canon_vx > 150:
             return atk_dir
-        # Jump/pull back slightly while lifting so ball doesn't hit us in the face
         return (def_dir | UP | GRAPPLE) if by > oy - 20 else (atk_dir | GRAPPLE)
 
     on_my_side = (bx < HALF_W + 40) if is_blue else (bx > HALF_W - 40)
@@ -112,6 +109,8 @@ def scripted_opponent(state: dict, opp_id: int) -> int:
         bits = RIGHT if target_x > stop_x + 14 else (LEFT if target_x < stop_x - 14 else 0)
         if 70 <= dist <= 108 and o.get("stamina", 1000) > 650:
             bits |= GRAPPLE
+        elif dist > 165 and o.get("onFloor", True) and o.get("stamina", 1000) > 750 and (bits in (LEFT, RIGHT)):
+            bits |= UP | GRAPPLE
         return bits
 
     stop_x = ox + (o["xv"] * abs(o["xv"])) / 320.0
@@ -121,14 +120,16 @@ def scripted_opponent(state: dict, opp_id: int) -> int:
 class WdbGymEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, stage: int = 2, max_steps: int = 900, selfplay_json: str = ""):
+    def __init__(self, stage: int = 2, max_steps: int = 900, selfplay_json: str = "", selfplay_dir: str = ""):
         super().__init__()
         self.stage = stage
         self.max_steps = max_steps
         self.selfplay_json = selfplay_json
+        self.selfplay_dir = selfplay_dir
+        self.pool_cache: dict[str, tuple[float, NumpyOppPolicy]] = {}
         self.opp_net = NumpyOppPolicy(selfplay_json) if (selfplay_json and os.path.exists(selfplay_json)) else None
         self.opp_mtime = os.path.getmtime(selfplay_json) if self.opp_net else 0.0
-        self.opp_mode = 'scripted'
+        self.opp_mode = "scripted"
         self.opp_tape = None
         self.action_space = spaces.Discrete(len(ACTION_TABLE))
         self.observation_space = spaces.Box(-5.0, 5.0, shape=(OBS_SIZE,), dtype=np.float32)
@@ -146,6 +147,25 @@ class WdbGymEnv(gym.Env):
         self.opp_team = TEAM_RED
         self.mirror = False
         self.prev_action = 0
+
+    def _pick_selfplay_opp(self) -> NumpyOppPolicy | None:
+        if self.selfplay_dir and os.path.isdir(self.selfplay_dir):
+            files = sorted(Path(self.selfplay_dir).glob("*.json"))
+            if files:
+                chosen = files[-1] if (len(files) == 1 or random.random() < 0.5) else random.choice(files)
+                p = str(chosen)
+                mt = os.path.getmtime(p)
+                cached = self.pool_cache.get(p)
+                if not cached or mt > cached[0]:
+                    self.pool_cache[p] = (mt, NumpyOppPolicy(p))
+                return self.pool_cache[p][1]
+        if self.selfplay_json and os.path.exists(self.selfplay_json):
+            mt = os.path.getmtime(self.selfplay_json)
+            if self.opp_net is None or mt > self.opp_mtime:
+                self.opp_net = NumpyOppPolicy(self.selfplay_json)
+                self.opp_mtime = mt
+            return self.opp_net
+        return None
 
     def _rpc(self, payload: dict) -> dict:
         assert self.proc.stdin and self.proc.stdout
@@ -169,11 +189,6 @@ class WdbGymEnv(gym.Env):
         self.self_id = 0 if self.self_team == TEAM_RED else 1
         self.opp_id = 1 - self.self_id
 
-        if self.selfplay_json and os.path.exists(self.selfplay_json):
-            mt = os.path.getmtime(self.selfplay_json)
-            if mt > self.opp_mtime:
-                self.opp_net = NumpyOppPolicy(self.selfplay_json)
-                self.opp_mtime = mt
         self.opp_tape = None
         if self.stage == 1:
             self.opp_mode = "idle"
@@ -185,9 +200,11 @@ class WdbGymEnv(gym.Env):
                 self.opp_mode = "scripted"
         else:
             r = random.random()
-            if self.opp_net is not None and r < 0.5:
+            sp = self._pick_selfplay_opp()
+            if sp is not None and r < 0.55:
+                self.opp_net = sp
                 self.opp_mode = "selfplay"
-            elif KICKOFF_TAPES and r < 0.8:
+            elif KICKOFF_TAPES and r < 0.80:
                 self.opp_mode = "tape"
                 self.opp_tape = random.choice(KICKOFF_TAPES)["canon"]
             else:
@@ -242,6 +259,8 @@ class WdbGymEnv(gym.Env):
         b_curr = curr["ball"]
         canon_vx = -b_curr["xv"] if self.mirror else b_curr["xv"]
         canon_bx = (WIDTH - b_curr["x"]) if self.mirror else b_curr["x"]
+        canon_sx = (WIDTH - me_curr.get("x", 265.0)) if self.mirror else me_curr.get("x", 265.0)
+        raw_bits = ACTION_TABLE[action]
 
         if not me_curr.get("alive") and me_prev.get("alive"):
             r -= 2.0
@@ -254,7 +273,6 @@ class WdbGymEnv(gym.Env):
             dist = math.hypot(b_curr["x"] - me_curr["x"], b_curr["y"] - me_curr["y"])
             ball_speed = math.hypot(b_curr["xv"], b_curr["yv"])
 
-            # Danger zone penalty inside 38px when not grappling
             if dist < 38.0 and not me_curr.get("holdingBall"):
                 r -= 0.025
 
@@ -265,15 +283,23 @@ class WdbGymEnv(gym.Env):
             elif me_prev.get("holdingBall") and canon_vx > 180.0:
                 r += 0.50 * min(1.5, canon_vx / BALL_MAX_V)
             else:
-                # Close distance into grapple range (~70px), penalize passive stalling when ball is contestable
-                d_prev = math.hypot(prev["ball"]["x"] - me_prev.get("x", me_curr["x"]), prev["ball"]["y"] - me_prev.get("y", me_curr["y"]))
-                if dist > 68.0 and ball_speed < 280.0:
+                d_prev = math.hypot(
+                    prev["ball"]["x"] - me_prev.get("x", me_curr["x"]),
+                    prev["ball"]["y"] - me_prev.get("y", me_curr["y"]),
+                )
+                if dist > 70.0 and ball_speed < 480.0:
                     r += 0.004 * max(-3.0, min(3.0, d_prev - dist))
-                if dist > 95.0 and ball_speed < 180.0:
-                    r -= 0.006
+                if canon_bx < HALF_W and dist > 95.0:
+                    r -= 0.008
+                elif dist > 125.0:
+                    r -= 0.003
+                if (raw_bits & HEAVY) and dist > 95.0:
+                    r -= 0.005
+                if canon_sx < 95.0 and canon_bx > 220.0:
+                    r -= 0.005
 
         if canon_bx > HALF_W:
-            r += 0.010 * max(0.0, canon_vx / BALL_MAX_V)
+            r += 0.008 * max(0.0, canon_vx / BALL_MAX_V)
 
         if action != self.prev_action:
             r -= 0.001
